@@ -69,7 +69,7 @@ function ScalaNeotestAdapter.discover_positions(path)
 
       ((call_expression
         function: (call_expression
-        function: (identifier) @func_name (#match? @func_name "test")
+        function: (identifier) @func_name (#match? @func_name "^(test|it|they)$")
         arguments: (arguments (string) @test.name))
       )) @test.definition
     ]]

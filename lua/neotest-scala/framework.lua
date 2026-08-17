@@ -19,6 +19,7 @@ local function strip_ainsi_chars(s)
         :gsub("\x1b%[%d+;%d+;%d+m", "")
         :gsub("\x1b%[%d+;%d+m", "")
         :gsub("\x1b%[%d+m", "")
+        :gsub("\27%[[%d;]*[A-Za-z]", "")
     return v
 end
 
@@ -46,11 +47,12 @@ local function build_command_with_test_path(project, runner, test_path, extra_ar
         return vim.tbl_flatten({ "bloop", "test", extra_args, project, full_test_path })
     end
     if not test_path then
-        return vim.tbl_flatten({ "sbt", extra_args, project .. "/test" })
+        return vim.tbl_flatten({ "sbt", "--client", extra_args, project .. "/test" })
     end
     -- TODO: Run sbt with colors, but figuoure wich ainsi sequence need to be matched.
     return vim.tbl_flatten({
         "sbt",
+        "--client",
         "--no-colors",
         extra_args,
         project .. "/testOnly -- " .. '"' .. test_path .. '"',
@@ -325,7 +327,7 @@ local function scalatest_framework()
             return vim.tbl_flatten({ "bloop", "test", extra_args, project, full_test_path })
         end
         if not test_namespace then
-            return vim.tbl_flatten({ "sbt", extra_args, project .. "/test" })
+            return vim.tbl_flatten({ "sbt", "--client", extra_args, project .. "/test" })
         end
         -- TODO: Run sbt with colors, but figuoure wich ainsi sequence need to be matched.
         local test_path = ""
@@ -334,6 +336,7 @@ local function scalatest_framework()
         end
         return vim.tbl_flatten({
             "sbt",
+            "--client",
             "--no-colors",
             extra_args,
             project .. "/testOnly " .. test_namespace .. test_path,

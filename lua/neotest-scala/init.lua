@@ -216,9 +216,8 @@ end
 ---Extract results from the test output.
 ---@param tree neotest.Tree
 ---@param test_results table<string, string>
----@param match_func nil|fun(test_results: table<string, string>, position_id :string):string|nil
 ---@return table<string, neotest.Result>
-local function get_results(tree, test_results, match_func)
+local function get_results(tree, test_results)
     local no_results = vim.tbl_isempty(test_results)
     local results = {}
     for _, node in tree:iter_nodes() do
@@ -226,12 +225,7 @@ local function get_results(tree, test_results, match_func)
         if no_results then
             results[position.id] = { status = TEST_FAILED }
         else
-            local test_result
-            if match_func then
-                test_result = match_func(test_results, position.id)
-            else
-                test_result = test_results[position.id]
-            end
+            local test_result = test_results[position.id]
             if test_result then
                 results[position.id] = { status = test_result }
             end
@@ -250,8 +244,8 @@ function ScalaNeotestAdapter.results(_, result, tree)
     if not success or not framework then
         return {}
     end
-    local test_results = framework.get_test_results(lines)
-    return get_results(tree, test_results, framework.match_func)
+    local test_results = framework.get_test_results(lines, tree)
+    return get_results(tree, test_results)
 end
 
 local is_callable = function(obj)

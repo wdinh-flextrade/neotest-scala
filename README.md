@@ -57,6 +57,23 @@ require("neotest").setup({
 })
 ```
 
+## Development
+
+Run the unit tests with [plenary.nvim](https://github.com/nvim-lua/plenary.nvim):
+
+```sh
+nvim --headless --noplugin -u tests/minimal_init.lua \
+  -c "PlenaryBustedDirectory tests/unit { minimal_init = 'tests/minimal_init.lua', sequential = true }"
+```
+
+`tests/minimal_init.lua` looks for plenary.nvim, nvim-nio and neotest in the lazy.nvim data directory and for the
+scala treesitter parser in `stdpath("data")/site`. Override these locations with `PLENARY_DIR`, `NIO_DIR`, `NEOTEST_DIR`
+and `TS_PARSER_DIR`.
+
+ScalaTest results are read from the reporter's `- <test name>` lines and matched against the test names discovered in
+the file. Lines may carry the sbt 1.x `[info] ` prefix (dropped in sbt 2) and may be preceded by test stdout that was not
+newline-terminated.
+
 ## Roadmap
 
 To be implemented:

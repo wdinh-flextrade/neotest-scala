@@ -4,11 +4,11 @@ local M = {}
 
 TEST_PASSED = "passed" -- the test passed
 TEST_FAILED = "failed" -- the test failed
+TEST_SKIPPED = "skipped" -- the test was ignored, canceled or pending
 
 ---@class neotest-scala.Framework
 ---@field build_command fun(runner: string, project: string, tree: neotest.Tree, name: string, extra_args: table|string): string[]
----@field get_test_results fun(output_lines: string[]): table<string, string>
----@field match_func nil|fun(test_results: table<string, string>, position_id :string):string|nil
+---@field get_test_results fun(output_lines: string[], tree: neotest.Tree): table<string, string> position id -> status
 
 --- Strip ainsi characters from the string, leaving the rest of the string intact.
 ---@param s string
@@ -19,14 +19,6 @@ local function strip_ainsi_chars(s)
         :gsub("\x1b%[%d+;%d+;%d+m", "")
         :gsub("\x1b%[%d+;%d+m", "")
         :gsub("\x1b%[%d+m", "")
-    return v
-end
-
---- Strip sbt info logging prefix from string.
----@param s string
----@return string
-local function strip_sbt_info_prefix(s)
-    local v = s:gsub("^%[info%] ", "")
     return v
 end
 
@@ -340,66 +332,110 @@ local function scalatest_framework()
         })
     end
 
-    ---Get test ID from the test line output.
-    ---@param output string
-    ---@return string
-    local function get_test_name(output, suffix)
-        return output:match("^- (.*)" .. suffix) or nil
+    -- Reporter line suffixes, checked in order. Lines without one are passed tests.
+    local status_suffixes = {
+        { " *** FAILED ***", TEST_FAILED },
+        { " !!! IGNORED !!!", TEST_SKIPPED },
+        { " !!! CANCELED !!!", TEST_SKIPPED },
+        { " (pending)", TEST_SKIPPED },
+    }
+    local status_priority = { [TEST_SKIPPED] = 1, [TEST_PASSED] = 2, [TEST_FAILED] = 3 }
+
+    ---@param line string
+    ---@return string body, string status
+    local function split_status(line)
+        for _, suffix in ipairs(status_suffixes) do
+            if vim.endswith(line, suffix[1]) then
+                return line:sub(1, -#suffix[1] - 1), suffix[2]
+            end
+        end
+        return line, TEST_PASSED
     end
 
-    ---Get test namespace from the test line output.
-    ---@param output string
+    ---Finds the longest candidate for which `line` ends with `prefix .. candidate .. suffix`.
+    ---@param line string
+    ---@param candidates string[]
+    ---@param prefix string
+    ---@param suffix string
     ---@return string|nil
-    local function get_test_namespace(output)
-        return output:match("^([%w%.]+):") or nil
+    local function longest_suffix_match(line, candidates, prefix, suffix)
+        local best = nil
+        for _, candidate in ipairs(candidates) do
+            if vim.endswith(line, prefix .. candidate .. suffix) and (not best or #candidate > #best) then
+                best = candidate
+            end
+        end
+        return best
+    end
+
+    ---Groups the tests in the tree by the simple name of their enclosing suite.
+    ---@param tree neotest.Tree
+    ---@return table<string, table<string, string>> suite name -> test name -> position id
+    local function collect_suites(tree)
+        local suites = {}
+        for _, node in tree:iter_nodes() do
+            local position = node:data()
+            if position.type == "test" then
+                local parent = node:parent()
+                while parent and parent:data().type ~= "namespace" do
+                    parent = parent:parent()
+                end
+                if parent then
+                    local suite = parent:data().name
+                    suites[suite] = suites[suite] or {}
+                    suites[suite][utils.get_position_name(position)] = position.id
+                end
+            end
+        end
+        return suites
     end
 
     -- Get test results from the test output.
+    --
+    -- Reporter lines are matched against the test names known from the tree rather than
+    -- parsed on their own. Test stdout is not newline-terminated before the reporter line,
+    -- so a line can look like `<stdout>[info] - name`. sbt 2 also drops the `[info]` prefix,
+    -- which leaves nothing to separate the stdout from the name.
     ---@param output_lines string[]
-    ---@return table<string, string>
-    local function get_test_results(output_lines)
+    ---@param tree neotest.Tree
+    ---@return table<string, string> position id -> status
+    local function get_test_results(output_lines, tree)
+        local suites = collect_suites(tree)
+        local suite_names = vim.tbl_keys(suites)
         local test_results = {}
-        local test_namespace = nil
+        local current_suite = #suite_names == 1 and suite_names[1] or nil
         for _, line in ipairs(output_lines) do
-            line = vim.trim(strip_sbt_info_prefix(strip_ainsi_chars(line)))
-            local current_namespace = get_test_namespace(line)
-            if current_namespace and (not test_namespace or test_namespace ~= current_namespace) then
-                test_namespace = current_namespace
-            end
-            if test_namespace and vim.startswith(line, "-") and vim.endswith(line, " *** FAILED ***") then
-                local test_name = get_test_name(line, " *** FAILED ***")
-                if test_name then
-                    local test_id = test_namespace .. "." .. vim.trim(test_name)
-                    test_results[test_id] = TEST_FAILED
+            line = strip_ainsi_chars(line):gsub("%s+$", "")
+            local suite = longest_suffix_match(line, suite_names, "", ":")
+            if suite then
+                current_suite = suite
+            elseif current_suite then
+                local tests = suites[current_suite]
+                local body, status = split_status(line)
+                local clean = body:gsub("^%[info%]", ""):gsub("^%s+", "")
+                local name
+                if vim.startswith(clean, "- ") then
+                    -- An uninterrupted reporter line must match a name exactly, so a filtered
+                    -- run cannot credit `- x - name` to a test called `name`.
+                    name = tests[clean:sub(3)] and clean:sub(3)
+                else
+                    name = longest_suffix_match(body, vim.tbl_keys(tests), "- ", "")
                 end
-            elseif test_namespace and vim.startswith(line, "-") then
-                local test_name = get_test_name(line, "")
-                if test_name then
-                    local test_id = test_namespace .. "." .. vim.trim(test_name)
-                    test_results[test_id] = TEST_PASSED
+                if name then
+                    local id = tests[name]
+                    local previous = test_results[id]
+                    if not previous or status_priority[status] > status_priority[previous] then
+                        test_results[id] = status
+                    end
                 end
             end
         end
         return test_results
     end
 
-    -- Get test results from the test output.
-    ---@param test_results table<string, string>
-    ---@param position_id string
-    ---@return string|nil
-    local function match_func(test_results, position_id)
-        for test_id, result in pairs(test_results) do
-            if position_id:match(test_id) then
-                return result
-            end
-        end
-        return nil
-    end
-
     return {
         get_test_results = get_test_results,
         build_command = build_command,
-        match_func = match_func,
     }
 end
 

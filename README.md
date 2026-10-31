@@ -70,7 +70,8 @@ metals_config.settings = { metals = { testUserInterface = "Test Explorer" } }
 ```
 
 Tests are matched to the suites and test cases Metals discovered, so a single test can only run once Metals has indexed
-its file.
+its file. If no test runs because the code does not compile, the run is marked failed with the compile errors Metals
+reports and its tests are marked skipped.
 
 ## Development
 

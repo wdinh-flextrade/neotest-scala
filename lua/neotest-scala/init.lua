@@ -254,7 +254,16 @@ end
 function ScalaNeotestAdapter.results(spec, result, tree)
     local metals_context = spec and spec.context and spec.context.metals
     if metals_context and #metals_context.events > 0 then
-        return metals.to_results(tree, metals.explorer_state(), metals_context.events)
+        local results = metals.to_results(tree, metals.explorer_state(), metals_context.events)
+        if not vim.tbl_isempty(results) then
+            return results
+        end
+    elseif metals_context then
+        -- No test ran: if the code does not compile, report that rather than failing every test.
+        local errors = metals.compile_errors(tree:data().path)
+        if #errors > 0 then
+            return metals.compile_error_results(tree, errors)
+        end
     end
     local success, lines = pcall(lib.files.read_lines, result.output)
     local framework = fw.get_framework_class(get_framework())

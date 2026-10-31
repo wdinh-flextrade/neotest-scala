@@ -54,8 +54,68 @@ local function class_name(namespace)
     return (utils.get_package_name(namespace.path) or "") .. namespace.name
 end
 
+local FULL_NAME_QUERY = [[
+  (call_expression
+    function: (call_expression
+      function: (identifier) @func (#any-of? @func "describe" "test" "it" "they")
+      arguments: (arguments . (string) @name))) @call
+]]
+
+local full_names_cache = {}
+
+---Full ScalaTest names of the tests in a file, by the 0-based row of their definition: the text
+---of each enclosing `describe` and of the test, joined by spaces (e.g. `SymbolCode accepts x`).
+---@param path string
+---@return table<integer, string>
+local function source_full_names(path)
+    local ok, content = pcall(lib.files.read, path)
+    if not ok then
+        return {}
+    end
+    local cached = full_names_cache[path]
+    if cached and cached.content == content then
+        return cached.names
+    end
+    local parser = vim.treesitter.get_string_parser(content, "scala")
+    local root = parser:parse()[1]:root()
+    local query = vim.treesitter.query.parse("scala", FULL_NAME_QUERY)
+    local describes, tests = {}, {}
+    for _, match in query:iter_matches(root, content, 0, -1, { all = true }) do
+        local captured = {}
+        for id, nodes in pairs(match) do
+            captured[query.captures[id]] = nodes[1]
+        end
+        local entry = {
+            node = captured.call,
+            name = vim.treesitter.get_node_text(captured.name, content):gsub('"', ""),
+        }
+        local func = vim.treesitter.get_node_text(captured.func, content)
+        table.insert(func == "describe" and describes or tests, entry)
+    end
+    local names = {}
+    for _, test in ipairs(tests) do
+        local parts = {}
+        for _, describe in ipairs(describes) do
+            if vim.treesitter.is_ancestor(describe.node, test.node) then
+                table.insert(parts, { row = describe.node:start(), name = describe.name })
+            end
+        end
+        table.sort(parts, function(a, b)
+            return a.row < b.row
+        end)
+        local full = vim.tbl_map(function(part)
+            return part.name
+        end, parts)
+        table.insert(full, test.name)
+        names[test.node:start()] = table.concat(full, " ")
+    end
+    full_names_cache[path] = { content = content, names = names }
+    return names
+end
+
 ---Metals names tests by their full path (e.g. `describe` + `it` text in a FunSpec), which the
----treesitter query does not capture, so tests are matched to Metals' test cases by line.
+---treesitter positions do not capture. Metals' test cases are used when it has them (matched by
+---line), otherwise the name is derived from the source.
 ---@return string
 local function test_name(suite, position)
     for _, case in ipairs((suite and suite.testCases) or {}) do
@@ -63,7 +123,7 @@ local function test_name(suite, position)
             return case.name
         end
     end
-    return utils.get_position_name(position)
+    return source_full_names(position.path)[position.range[1]] or utils.get_position_name(position)
 end
 
 ---Builds the `debug-adapter-start` arguments for the position at the root of `tree`.
@@ -163,6 +223,54 @@ local function metals_client(path)
         end
     end
     return clients[1]
+end
+
+---Compile errors Metals currently reports for the workspace of `path`.
+---@async
+---@param path string
+---@return { path: string, lnum: integer, col: integer, message: string }[]
+function M.compile_errors(path)
+    nio.scheduler()
+    local client = metals_client(path)
+    if not client then
+        return {}
+    end
+    local namespace = vim.lsp.diagnostic.get_namespace(client.id, false)
+    local diagnostics = vim.diagnostic.get(nil, { namespace = namespace, severity = vim.diagnostic.severity.ERROR })
+    local errors = {}
+    for _, diagnostic in ipairs(diagnostics) do
+        table.insert(errors, {
+            path = vim.api.nvim_buf_get_name(diagnostic.bufnr),
+            lnum = diagnostic.lnum,
+            col = diagnostic.col,
+            message = diagnostic.message,
+        })
+    end
+    return errors
+end
+
+---Results for a run that could not start because the code does not compile: the run position
+---fails with the compile errors and everything under it is skipped.
+---@param tree neotest.Tree
+---@param errors table[] see `compile_errors`
+---@return table<string, neotest.Result>
+function M.compile_error_results(tree, errors)
+    local root = tree:data()
+    local lines, inline = { "Compilation failed" }, {}
+    for _, err in ipairs(errors) do
+        table.insert(lines, ("%s:%d:%d: %s"):format(err.path, err.lnum + 1, err.col + 1, err.message))
+        if err.path == root.path then
+            table.insert(inline, { message = err.message, line = err.lnum })
+        end
+    end
+    local results = { [root.id] = { status = "failed", short = table.concat(lines, "\n"), errors = inline } }
+    for _, node in tree:iter_nodes() do
+        local position = node:data()
+        if position.id ~= root.id then
+            results[position.id] = { status = "skipped" }
+        end
+    end
+    return results
 end
 
 ---neotest strategy that runs `spec.context.metals.request` through Metals. Received `testResult`

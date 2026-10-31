@@ -78,6 +78,26 @@ describe("metals runner", function()
         )
     end)
 
+    nio.tests.it("derives describe-prefixed names from the source when Metals has no test cases", function()
+        local tree = discover()
+        local state = { ["root-test"] = { uri = TARGET_URI, suites = { [FIRST] = {}, [SECOND] = {} } } }
+        local request = metals.build_request(tree:get_key(FIRST .. ".is not empty"), state)
+        assert.are.same({ "Main.msg is not empty" }, request.requestData.suites[1].tests)
+        local results = metals.to_results(tree, state, {
+            {
+                suiteName = FIRST,
+                tests = {
+                    { kind = "passed", testName = "Main.msg returns a greeting" },
+                    { kind = "failed", testName = "Main.msg is not empty" },
+                },
+            },
+            { suiteName = SECOND, tests = { { kind = "passed", testName = "returns a greeting" } } },
+        })
+        assert.are.same("passed", results[FIRST .. ".returns a greeting"].status)
+        assert.are.same("failed", results[FIRST .. ".is not empty"].status)
+        assert.are.same("passed", results[SECOND .. ".returns a greeting"].status)
+    end)
+
     nio.tests.it("maps testResult events to positions of their suite", function()
         local tree = discover()
         local results = metals.to_results(tree, STATE, {
@@ -93,6 +113,36 @@ describe("metals runner", function()
         assert.are.same("passed", results[FIRST .. ".returns a greeting"].status)
         assert.are.same("failed", results[FIRST .. ".is not empty"].status)
         assert.are.same({ { message = "was empty", line = 5 } }, results[FIRST .. ".is not empty"].errors)
+        assert.are.same("skipped", results[SECOND .. ".returns a greeting"].status)
+    end)
+
+    nio.tests.it("reports compile errors and skips the tests when nothing ran", function()
+        local tree = discover()
+        local path = tree:data().path
+        local original = metals.compile_errors
+        metals.compile_errors = function()
+            return {
+                { path = path, lnum = 4, col = 6, message = "Not found: foo" },
+                { path = "/p/Other.scala", lnum = 0, col = 0, message = "type mismatch" },
+            }
+        end
+        local output = os.tmpname()
+        local file = assert(io.open(output, "w"))
+        file:write("[error] compilation failed\n")
+        file:close()
+        local ok, results = pcall(adapter.results, { context = { metals = { events = {} } } }, { output = output }, tree)
+        metals.compile_errors = original
+        assert(ok, results)
+
+        local root = results[path]
+        assert.are.same("failed", root.status)
+        assert.are.same(
+            "Compilation failed\n" .. path .. ":5:7: Not found: foo\n/p/Other.scala:1:1: type mismatch",
+            root.short
+        )
+        assert.are.same({ { message = "Not found: foo", line = 4 } }, root.errors)
+        assert.are.same("skipped", results[FIRST .. ".returns a greeting"].status)
+        assert.are.same("skipped", results[FIRST .. ".is not empty"].status)
         assert.are.same("skipped", results[SECOND .. ".returns a greeting"].status)
     end)
 end)

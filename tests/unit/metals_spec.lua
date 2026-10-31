@@ -63,6 +63,21 @@ describe("metals runner", function()
         }, request)
     end)
 
+    nio.tests.it("runs a file's suites on the JVM target of a cross-built project", function()
+        local tree = discover()
+        local suite = { testCases = {} }
+        local state = {
+            ["domainjs-test"] = { uri = "file:/p/#domainJS/Test", suites = { [FIRST] = suite, [SECOND] = suite } },
+            ["domainjvm-test"] = { uri = "file:/p/#domainJVM/Test", suites = { [FIRST] = suite, [SECOND] = suite } },
+        }
+        local request = metals.build_request(tree, state)
+        assert.are.same({ uri = "file:/p/#domainJVM/Test" }, request.target)
+        assert.are.same(
+            { { className = FIRST, tests = {} }, { className = SECOND, tests = {} } },
+            request.requestData.suites
+        )
+    end)
+
     nio.tests.it("maps testResult events to positions of their suite", function()
         local tree = discover()
         local results = metals.to_results(tree, STATE, {

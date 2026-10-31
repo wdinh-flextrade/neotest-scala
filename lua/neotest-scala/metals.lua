@@ -14,14 +14,28 @@ function M.explorer_state()
     return ok and test_explorer.state or {}
 end
 
+---Scala.js test targets cannot be run through Metals (e.g. the `fooJS` half of a cross project).
+---@param target_name string
+---@return boolean
+local function is_scala_js(target_name)
+    return target_name:lower():match("js%-test$") ~= nil
+end
+
+---Finds the suite in the build targets Metals discovered, preferring a runnable (non Scala.js)
+---target when a cross-built suite is in several.
 ---@return table|nil suite, string|nil target_uri
 local function find_suite(state, class_name)
-    for _, target in pairs(state) do
+    local fallback, fallback_uri
+    for target_name, target in pairs(state) do
         local suite = target.suites and target.suites[class_name]
         if suite then
-            return suite, target.uri
+            if not is_scala_js(target_name) then
+                return suite, target.uri
+            end
+            fallback, fallback_uri = suite, target.uri
         end
     end
+    return fallback, fallback_uri
 end
 
 ---@param tree neotest.Tree
@@ -58,33 +72,43 @@ end
 ---@return table|nil request, string|nil error
 function M.build_request(tree, state)
     local position = tree:data()
+    local suites, target_uri = {}, nil
     if position.type == "file" then
-        return { path = vim.uri_from_fname(position.path), runType = "testFile" }
-    end
-    local namespace = enclosing_namespace(tree)
-    if not namespace then
-        return nil, "No test class encloses " .. position.name
-    end
-    local name = class_name(namespace:data())
-    local suite, target_uri = find_suite(state, name)
-    if not suite then
-        if position.type == "namespace" then
-            return { testClass = name }
+        -- Running the discovered suites rather than `runType = "testFile"` lets the JVM target be
+        -- chosen; Metals' own file discovery may pick a Scala.js target and find no runnable tests.
+        for _, node in tree:iter_nodes() do
+            local namespace = node:data()
+            if namespace.type == "namespace" then
+                local name = class_name(namespace)
+                local suite, uri = find_suite(state, name)
+                if suite and (not target_uri or uri == target_uri) then
+                    target_uri = uri
+                    table.insert(suites, { className = name, tests = {} })
+                end
+            end
         end
-        return nil, "Metals has not discovered test suite " .. name .. " yet"
+        if not target_uri then
+            return { path = vim.uri_from_fname(position.path), runType = "testFile" }
+        end
+    else
+        local namespace = enclosing_namespace(tree)
+        if not namespace then
+            return nil, "No test class encloses " .. position.name
+        end
+        local name = class_name(namespace:data())
+        local suite, uri = find_suite(state, name)
+        if not suite then
+            if position.type == "namespace" then
+                return { testClass = name }
+            end
+            return nil, "Metals has not discovered test suite " .. name .. " yet"
+        end
+        target_uri = uri
+        suites = { { className = name, tests = position.type == "test" and { test_name(suite, position) } or {} } }
     end
     return {
         target = { uri = target_uri },
-        requestData = {
-            suites = {
-                {
-                    className = name,
-                    tests = position.type == "test" and { test_name(suite, position) } or {},
-                },
-            },
-            jvmOptions = {},
-            environmentVariables = {},
-        },
+        requestData = { suites = suites, jvmOptions = {}, environmentVariables = {} },
     }
 end
 

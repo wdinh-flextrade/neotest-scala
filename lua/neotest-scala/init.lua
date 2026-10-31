@@ -1,6 +1,7 @@
 local Path = require("plenary.path")
 local lib = require("neotest.lib")
 local fw = require("neotest-scala.framework")
+local metals = require("neotest-scala.metals")
 local utils = require("neotest-scala.utils")
 
 ---@type neotest.Adapter
@@ -200,7 +201,19 @@ end
 function ScalaNeotestAdapter.build_spec(args)
     local position = args.tree:data()
     local runner = get_runner()
-    assert(lib.func_util.index({ "bloop", "sbt" }, runner), "set sbt or bloop runner")
+    if runner == "metals" then
+        -- Directories are broken down into files by neotest.
+        if position.type == "dir" then
+            return nil
+        end
+        local request, err = metals.build_request(args.tree, metals.explorer_state())
+        if args.strategy == "dap" then
+            assert(request, err)
+            return { strategy = { type = "scala", request = "launch", name = "from_lens", metals = request } }
+        end
+        return { strategy = metals.strategy, context = { metals = { request = request, error = err, events = {} } } }
+    end
+    assert(lib.func_util.index({ "bloop", "sbt" }, runner), "set metals, sbt or bloop runner")
     local project = get_project_name(position.path, runner)
     assert(project, "scala project not found in the build file")
     local framework = fw.get_framework_class(get_framework())
@@ -238,7 +251,11 @@ end
 ---@param result neotest.StrategyResult
 ---@param tree neotest.Tree
 ---@return table<string, neotest.Result>
-function ScalaNeotestAdapter.results(_, result, tree)
+function ScalaNeotestAdapter.results(spec, result, tree)
+    local metals_context = spec and spec.context and spec.context.metals
+    if metals_context and #metals_context.events > 0 then
+        return metals.to_results(tree, metals.explorer_state(), metals_context.events)
+    end
     local success, lines = pcall(lib.files.read_lines, result.output)
     local framework = fw.get_framework_class(get_framework())
     if not success or not framework then

@@ -46,7 +46,7 @@ require("neotest").setup({
         -- Runner to use. Will use bloop by default.
         -- Can be a function to return dynamic value.
         -- For backwards compatibility, it also tries to read the vim-test scala config.
-        -- Possibly values bloop|sbt.
+        -- Possibly values bloop|sbt|metals.
         runner = "bloop",
         -- Test framework to use. Will use utest by default.
         -- Can be a function to return dynamic value.
@@ -56,6 +56,21 @@ require("neotest").setup({
   }
 })
 ```
+
+## Metals runner
+
+With `runner = "metals"` tests run through the build server [nvim-metals](https://github.com/scalameta/nvim-metals) is
+connected to, and results come from the per-test events Metals reports instead of parsed output. nvim-dap is not
+needed, but Metals must be started with the debugging and Test Explorer providers enabled:
+
+```lua
+metals_config.init_options.debuggingProvider = true
+metals_config.init_options.testExplorerProvider = true
+metals_config.settings = { metals = { testUserInterface = "Test Explorer" } }
+```
+
+Tests are matched to the suites and test cases Metals discovered, so a single test can only run once Metals has indexed
+its file.
 
 ## Development
 

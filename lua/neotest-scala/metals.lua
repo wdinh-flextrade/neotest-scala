@@ -57,14 +57,19 @@ end
 local FULL_NAME_QUERY = [[
   (call_expression
     function: (call_expression
-      function: (identifier) @func (#any-of? @func "describe" "test" "it" "they")
+      function: (identifier) @func (#any-of? @func "describe" "suite" "test" "it" "they")
       arguments: (arguments . (string) @name))) @call
 ]]
 
+-- How a group's label joins the names under it: ScalaTest `describe` with a space, ZIO `suite`
+-- with " - " (the label path ZIO Test reports).
+local GROUP_SEPARATORS = { describe = " ", suite = " - " }
+
 local full_names_cache = {}
 
----Full ScalaTest names of the tests in a file, by the 0-based row of their definition: the text
----of each enclosing `describe` and of the test, joined by spaces (e.g. `SymbolCode accepts x`).
+---Full names of the tests in a file, by the 0-based row of their definition: the labels of the
+---enclosing groups and of the test, e.g. `SymbolCode accepts x` (ScalaTest `describe`) or
+---`Outer - Inner - works` (ZIO `suite`).
 ---@param path string
 ---@return table<integer, string>
 local function source_full_names(path)
@@ -79,35 +84,37 @@ local function source_full_names(path)
     local parser = vim.treesitter.get_string_parser(content, "scala")
     local root = parser:parse()[1]:root()
     local query = vim.treesitter.query.parse("scala", FULL_NAME_QUERY)
-    local describes, tests = {}, {}
+    local groups, tests = {}, {}
     for _, match in query:iter_matches(root, content, 0, -1, { all = true }) do
         local captured = {}
         for id, nodes in pairs(match) do
             captured[query.captures[id]] = nodes[1]
         end
+        local func = vim.treesitter.get_node_text(captured.func, content)
         local entry = {
             node = captured.call,
             name = vim.treesitter.get_node_text(captured.name, content):gsub('"', ""),
+            separator = GROUP_SEPARATORS[func],
         }
-        local func = vim.treesitter.get_node_text(captured.func, content)
-        table.insert(func == "describe" and describes or tests, entry)
+        table.insert(entry.separator and groups or tests, entry)
     end
     local names = {}
     for _, test in ipairs(tests) do
         local parts = {}
-        for _, describe in ipairs(describes) do
-            if vim.treesitter.is_ancestor(describe.node, test.node) then
-                table.insert(parts, { row = describe.node:start(), name = describe.name })
+        for _, group in ipairs(groups) do
+            if vim.treesitter.is_ancestor(group.node, test.node) then
+                table.insert(parts, { row = group.node:start(), group = group })
             end
         end
         table.sort(parts, function(a, b)
             return a.row < b.row
         end)
-        local full = vim.tbl_map(function(part)
-            return part.name
-        end, parts)
+        local full = {}
+        for _, part in ipairs(parts) do
+            table.insert(full, part.group.name .. part.group.separator)
+        end
         table.insert(full, test.name)
-        names[test.node:start()] = table.concat(full, " ")
+        names[test.node:start()] = table.concat(full)
     end
     full_names_cache[path] = { content = content, names = names }
     return names
@@ -178,28 +185,35 @@ local statuses = { passed = "passed", failed = "failed", error = "failed" }
 ---@param tree neotest.Tree
 ---@param state table see `explorer_state`
 ---@param events table[] `testResult` event data: `{ suiteName, tests = { { kind, testName, error } } }`
----@return table<string, neotest.Result>
+---@return table<string, neotest.Result> results, string[] unmatched `<suite>: <test> (<kind>)` of tests no position matched
 function M.to_results(tree, state, events)
-    local positions = {} -- class name -> Metals test name -> position
+    -- class name -> name -> position, by the full name from the source (e.g. ZIO's
+    -- `suite - test`) and by the name Metals discovered (which ZIO reports without suite labels)
+    local by_full_name, by_metals_name = {}, {}
     for _, node in tree:iter_nodes() do
         local position = node:data()
         local namespace = position.type == "test" and enclosing_namespace(node)
         if namespace then
             local name = class_name(namespace:data())
-            positions[name] = positions[name] or {}
-            positions[name][test_name(find_suite(state, name), position)] = position
+            by_full_name[name] = by_full_name[name] or {}
+            by_metals_name[name] = by_metals_name[name] or {}
+            local full = source_full_names(position.path)[position.range[1]]
+            if full then
+                by_full_name[name][full] = position
+            end
+            by_metals_name[name][test_name(find_suite(state, name), position)] = position
         end
     end
-    local results = {}
+    local results, unmatched = {}, {}
     for _, event in ipairs(events) do
-        local suite = positions[event.suiteName] or {}
         for _, test in ipairs(event.tests or {}) do
             local name = test.testName or ""
             -- Some frameworks (e.g. JUnit) prefix test names with the class name.
             if vim.startswith(name, event.suiteName .. ".") then
                 name = name:sub(#event.suiteName + 2)
             end
-            local position = suite[name]
+            local position = (by_full_name[event.suiteName] or {})[name]
+                or (by_metals_name[event.suiteName] or {})[name]
             if position then
                 local result = { status = statuses[test.kind] or "skipped" }
                 if test.error then
@@ -207,10 +221,23 @@ function M.to_results(tree, state, events)
                     result.errors = { { message = test.error, line = position.range[1] } }
                 end
                 results[position.id] = result
+            else
+                table.insert(unmatched, ("%s: %s (%s)"):format(event.suiteName, name, test.kind))
             end
         end
     end
-    return results
+    return results, unmatched
+end
+
+---Results for a run whose Metals results matched no test: the run position fails, listing what
+---Metals reported, and everything under it is skipped, rather than guessing from the output.
+---@param tree neotest.Tree
+---@param unmatched string[] see `to_results`
+---@return table<string, neotest.Result>
+function M.unmatched_results(tree, unmatched)
+    local message = "Could not match the test results Metals reported to tests in this file:\n"
+        .. table.concat(unmatched, "\n")
+    return M.failed_run_results(tree, message, {})
 end
 
 ---@param path string
@@ -249,8 +276,25 @@ function M.compile_errors(path)
     return errors
 end
 
----Results for a run that could not start because the code does not compile: the run position
----fails with the compile errors and everything under it is skipped.
+---Results for a run that produced no test results: the run position fails with `short` and
+---everything under it is skipped.
+---@param tree neotest.Tree
+---@param short string
+---@param errors neotest.Error[]
+---@return table<string, neotest.Result>
+function M.failed_run_results(tree, short, errors)
+    local root = tree:data()
+    local results = { [root.id] = { status = "failed", short = short, errors = errors } }
+    for _, node in tree:iter_nodes() do
+        local position = node:data()
+        if position.id ~= root.id then
+            results[position.id] = { status = "skipped" }
+        end
+    end
+    return results
+end
+
+---Results for a run that could not start because the code does not compile.
 ---@param tree neotest.Tree
 ---@param errors table[] see `compile_errors`
 ---@return table<string, neotest.Result>
@@ -263,14 +307,7 @@ function M.compile_error_results(tree, errors)
             table.insert(inline, { message = err.message, line = err.lnum })
         end
     end
-    local results = { [root.id] = { status = "failed", short = table.concat(lines, "\n"), errors = inline } }
-    for _, node in tree:iter_nodes() do
-        local position = node:data()
-        if position.id ~= root.id then
-            results[position.id] = { status = "skipped" }
-        end
-    end
-    return results
+    return M.failed_run_results(tree, table.concat(lines, "\n"), inline)
 end
 
 ---neotest strategy that runs `spec.context.metals.request` through Metals. Received `testResult`

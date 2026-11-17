@@ -145,4 +145,64 @@ describe("metals runner", function()
         assert.are.same("skipped", results[FIRST .. ".is not empty"].status)
         assert.are.same("skipped", results[SECOND .. ".returns a greeting"].status)
     end)
+
+    nio.tests.it("matches ZIO test names prefixed with their enclosing suite labels", function()
+        local path = vim.fn.tempname() .. "Spec.scala"
+        local file = assert(io.open(path, "w"))
+        file:write([[
+package com.example
+
+object ZioSpec extends ZIOSpecDefault {
+  override def spec = suite("Outer")(
+    test("works") { assertTrue(true) },
+    suite("Inner")(
+      test("also works") { assertTrue(true) }
+    )
+  )
+}
+]])
+        file:close()
+        local tree = adapter.discover_positions(path)
+        local zio = "com.example.ZioSpec"
+        local state = {
+            ["root-test"] = {
+                uri = TARGET_URI,
+                suites = { [zio] = { testCases = { test_case("works", 4), test_case("also works", 6) } } },
+            },
+        }
+        local tests = {}
+        for _, node in tree:iter_nodes() do
+            if node:data().type == "test" then
+                table.insert(tests, node:data())
+            end
+        end
+        assert.are.same(2, #tests)
+        local results = metals.to_results(tree, state, {
+            {
+                suiteName = zio,
+                tests = {
+                    { kind = "passed", testName = "Outer - works" },
+                    { kind = "failed", testName = "Outer - Inner - also works", error = "boom" },
+                },
+            },
+        })
+        assert.are.same("passed", results[tests[1].id] and results[tests[1].id].status)
+        assert.are.same("failed", results[tests[2].id] and results[tests[2].id].status)
+    end)
+
+    nio.tests.it("fails the run instead of guessing when Metals results match no test", function()
+        local tree = discover()
+        local output = os.tmpname()
+        local file = assert(io.open(output, "w"))
+        file:write("  - returns a greeting\n")
+        file:close()
+        local events = { { suiteName = SECOND, tests = { { kind = "failed", testName = "Unknown - returns a greeting" } } } }
+        local results = adapter.results({ context = { metals = { events = events } } }, { output = output }, tree)
+
+        local root = results[tree:data().id]
+        assert.are.same("failed", root and root.status)
+        assert.truthy(root.short:find("Unknown - returns a greeting", 1, true))
+        assert.are.same("skipped", results[SECOND .. ".returns a greeting"].status)
+        assert.are.same("skipped", results[FIRST .. ".is not empty"].status)
+    end)
 end)

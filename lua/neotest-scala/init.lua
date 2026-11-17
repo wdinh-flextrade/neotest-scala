@@ -254,10 +254,13 @@ end
 function ScalaNeotestAdapter.results(spec, result, tree)
     local metals_context = spec and spec.context and spec.context.metals
     if metals_context and #metals_context.events > 0 then
-        local results = metals.to_results(tree, metals.explorer_state(), metals_context.events)
-        if not vim.tbl_isempty(results) then
-            return results
+        local results, unmatched = metals.to_results(tree, metals.explorer_state(), metals_context.events)
+        if vim.tbl_isempty(results) then
+            -- Output parsing would apply the configured framework's format to another framework's
+            -- output (e.g. ScalaTest's "- name" means passed, ZIO's means failed).
+            return metals.unmatched_results(tree, unmatched)
         end
+        return results
     elseif metals_context then
         -- No test ran: if the code does not compile, report that rather than failing every test.
         local errors = metals.compile_errors(tree:data().path)
